@@ -43,7 +43,8 @@ export function extractLocalRefs(text: string): LocalRef[] {
   const refs: LocalRef[] = [];
   const codeRegions = findCodeRegions(text);
 
-  const wiki = /!?\[\[([^\]\n]+?)\]\]/g;
+  // 内容惰性匹配到第一个 ]]，允许文件名中出现单个方括号（如「视频 [itjc8.com].mp4」）
+  const wiki = /!?\[\[([^\n]+?)\]\]/g;
   let match: RegExpExecArray | null;
   while ((match = wiki.exec(text)) !== null) {
     if (isInCodeRegion(match.index, codeRegions)) continue;
@@ -64,7 +65,8 @@ export function extractLocalRefs(text: string): LocalRef[] {
     });
   }
 
-  const markdown = /!?\[([^\]\n]*)\]\(([^)\n]+)\)/g;
+  // 链接地址允许一层成对圆括号，兼容「Photog. (1).png」这类文件名
+  const markdown = /!?\[([^\]\n]*)\]\(((?:[^()\n]|\([^()\n]*\))+)\)/g;
   while ((match = markdown.exec(text)) !== null) {
     if (isInCodeRegion(match.index, codeRegions)) continue;
     const raw = match[0];
