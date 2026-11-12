@@ -18,7 +18,7 @@ import {
 } from "./types";
 import { DEFAULT_SETTINGS, getReplacementForExt, mergeSettings } from "./settings";
 import { extractLocalRefs } from "./link-parser";
-import { putS3Object, deleteS3Object } from "./s3-client";
+import { putS3Object, deleteS3Object, headS3Object } from "./s3-client";
 import { sha256Hex } from "./crypto";
 import {
   basename,
@@ -36,6 +36,7 @@ import { VaultBatchModal } from "./vault-batch-modal";
 import { VaultBatchFilterModal } from "./vault-batch-filter-modal";
 import { DryRunModal } from "./dry-run-modal";
 import { AttachmentImagebedSettingTab } from "./settings-tab";
+import { InstantUploadManager } from "./instant-upload";
 import {
   isFileQuiet,
   meetsAutoScanSize,
@@ -49,6 +50,8 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
   autoScanTimer: number | null = null;
   autoScanRunning = false;
   isMobile: boolean = false;
+  /** 粘贴/拖入即上传与外部写入自动上传，仅桌面端创建 */
+  instantUploader: InstantUploadManager | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -103,10 +106,18 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
       );
     }
     this.configureAutoScan();
+
+    // 立即上传只在桌面端启用，开关在运行时读取，切换设置无需重载插件
+    if (!this.isMobile) {
+      this.instantUploader = new InstantUploadManager(this);
+      this.instantUploader.register();
+    }
   }
 
   onunload(): void {
     if (this.autoScanTimer) window.clearInterval(this.autoScanTimer);
+    // 清理立即上传的定时器
+    this.instantUploader?.dispose();
   }
 
   async loadSettings(): Promise<void> {
@@ -448,6 +459,8 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
             enforceSizeRule: true,
           });
           const quietCandidates = candidates.filter((c) => {
+            // 正在立即上传的附件交给立即上传流程处理
+            if (this.instantUploader?.inflightPaths.has(c.file.path)) return false;
             if (!this.isQuiet(c.file)) return false;
             if (!meetsAutoScanSize(c.sizeBytes, this.settings.autoScanMinSizeMiB)) return false;
             return true;
@@ -582,7 +595,8 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
           });
           upload = await this.uploadCandidate(candidate);
           uploaded.set(candidate.file.path, upload);
-          uploadedKeys.push(upload.key);
+          // 只记录本次新建的对象，回滚时不会误删其他笔记共用的已有对象
+          if (upload.created) uploadedKeys.push(upload.key);
           if (options.uploadCache) {
             options.uploadCache.set(candidate.file.path, upload);
             newlyCachedPaths.push(candidate.file.path);
@@ -693,16 +707,33 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
   }
 
   async uploadCandidate(candidate: Candidate): Promise<UploadResult> {
-    const binary = await this.app.vault.readBinary(candidate.file);
+    return this.uploadFile(candidate.file);
+  }
+
+  /**
+   * 上传单个附件，对象键含内容哈希且云端已存在时直接复用，不重复上传。
+   *
+   * @param file 待上传的附件
+   * @returns 对象键、公开地址，以及本次是否新建了云端对象
+   */
+  async uploadFile(file: TFile): Promise<UploadResult> {
+    const binary = await this.app.vault.readBinary(file);
     const body = new Uint8Array(binary);
     const hash = await sha256Hex(body);
-    const ext = candidate.file.extension.toLowerCase();
+    const ext = file.extension.toLowerCase();
     const key = renderPathTemplate(this.settings.s3.pathTemplate, {
       ext,
       hash,
       hash2: hash.slice(0, 2),
-      filename: safeFilename(candidate.file.name),
+      filename: safeFilename(file.name),
     });
+    const publicUrl = buildPublicUrl(this.settings.s3.customDomainName, key);
+    // 上传前查询对象是否已存在
+    const exists = await headS3Object(this.settings.s3, key);
+    // 路径模板含内容哈希时，同名对象内容必然一致，直接复用
+    if (exists === true && this.isContentAddressedTemplate()) {
+      return { key, publicUrl, created: false };
+    }
     const contentType = contentTypeForExt(ext);
     await putS3Object(
       this.settings.s3,
@@ -712,7 +743,19 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
       (status, text) => this.t("uploadFailed", { status, text }),
       hash
     );
-    return { key, publicUrl: buildPublicUrl(this.settings.s3.customDomainName, key) };
+    // 只有确认上传前不存在时才算新建；无法判断或覆盖已有对象时按非新建处理，避免回滚误删
+    return { key, publicUrl, created: exists === false };
+  }
+
+  /**
+   * 判断对象路径模板是否以内容哈希命名，只有这种情况下同名对象才能安全复用。
+   *
+   * @returns 路径模板包含 {hash} 时返回 true
+   */
+  isContentAddressedTemplate(): boolean {
+    // 未配置模板时使用默认模板，默认模板包含 {hash}
+    const template = this.settings.s3.pathTemplate || "attachments/{ext}/{hash2}/{hash}.{ext}";
+    return template.includes("{hash}");
   }
 
   getEffectiveDeleteMode(requested?: DeletePolicy): DeletePolicy {

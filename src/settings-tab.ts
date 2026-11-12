@@ -243,10 +243,17 @@ export class AttachmentImagebedSettingTab extends PluginSettingTab {
         .setDesc(t("deleteDelayHoursDesc"))
         .addText((text) =>
           text.setValue(String(this.plugin.settings.autoDeleteDelayHours)).onChange((value) => {
-            this.plugin.settings.autoDeleteDelayHours = Math.max(0, Number(value) || 24);
+            // 允许填 0 表示上传后立即进入删除队列，只有非法输入才回退 24 小时
+            const hours = Number(value);
+            this.plugin.settings.autoDeleteDelayHours =
+              value.trim() !== "" && Number.isFinite(hours) && hours >= 0 ? hours : 24;
             void debouncedSave();
           })
         );
+    }
+
+    if (!this.plugin.isMobile) {
+      this.renderInstantUploadSettings(containerEl);
     }
 
     if (!this.plugin.isMobile) {
@@ -299,6 +306,62 @@ export class AttachmentImagebedSettingTab extends PluginSettingTab {
         cls: "setting-item-description",
       });
       hintEl.textContent = t("mobileHint");
+    }
+  }
+
+  /**
+   * 渲染立即上传相关设置：粘贴/拖入后立即上传、外部写入自动上传、立即上传大小上限（仅桌面端）。
+   *
+   * @param containerEl 设置页容器
+   */
+  private renderInstantUploadSettings(containerEl: HTMLElement): void {
+    const t = makeT(this.plugin);
+    const save = () => this.plugin.saveSettings();
+    const debouncedSave = debounce(save, 500);
+
+    // 粘贴/拖入后立即上传开关
+    new Setting(containerEl)
+      .setName(t("instantUpload"))
+      .setDesc(t("instantUploadDesc"))
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.instantUploadEnabled).onChange((value) => {
+          this.plugin.settings.instantUploadEnabled = value;
+          void save();
+          this.display();
+        })
+      );
+
+    // 外部工具写入的附件自动上传开关
+    new Setting(containerEl)
+      .setName(t("externalUpload"))
+      .setDesc(t("externalUploadDesc"))
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.externalUploadEnabled).onChange((value) => {
+          this.plugin.settings.externalUploadEnabled = value;
+          void save();
+          this.display();
+        })
+      );
+
+    // 任一立即上传开关开启时才显示大小上限
+    if (this.plugin.settings.instantUploadEnabled || this.plugin.settings.externalUploadEnabled) {
+      new Setting(containerEl)
+        .setName(t("instantUploadMaxSize"))
+        .setDesc(t("instantUploadMaxSizeDesc"))
+        .addText((text) =>
+          text.setValue(String(this.plugin.settings.instantUploadMaxSizeMiB || 0)).onChange((value) => {
+            this.plugin.settings.instantUploadMaxSizeMiB = Math.max(0, Number(value) || 0);
+            void debouncedSave();
+          })
+        );
+    }
+
+    // 路径模板不含内容哈希时提示无法复用已上传文件
+    if (!this.plugin.isContentAddressedTemplate()) {
+      containerEl.createEl("p", {
+        text: t("reuseUnavailableHint"),
+        cls: "setting-item-description",
+      });
     }
   }
 

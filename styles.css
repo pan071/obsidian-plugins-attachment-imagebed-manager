@@ -788,3 +788,50 @@
     overflow-wrap: anywhere;
   }
 }
+
+/* 立即上传：正在上传的链接淡化显示，不可编辑 */
+.attachment-imagebed-manager-uploading-link {
+  opacity: 0.55;
+  text-decoration: underline dashed var(--text-faint);
+}
+
+/* 立即上传：链接后方的「上传中」标签 */
+.attachment-imagebed-manager-uploading-widget {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  vertical-align: middle;
+  user-select: none;
+}
+
+/* 立即上传：旋转图标 */
+.attachment-imagebed-manager-uploading-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--text-faint);
+  border-top-color: var(--interactive-accent);
+  border-radius: 50%;
+  animation: attachment-imagebed-manager-spin 0.8s linear infinite;
+}
+
+@keyframes attachment-imagebed-manager-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 立即上传：没有上传任务时隐藏状态栏 */
+.attachment-imagebed-manager-statusbar-hidden {
+  display: none;
+}
+
+/* 立即上传失败提示中的重试按钮 */
+.attachment-imagebed-manager-retry {
+  margin-left: 8px;
+}

@@ -29,7 +29,7 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 
 // src/plugin.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/file-categories.ts
 var FILE_CATEGORIES = [
@@ -37,6 +37,7 @@ var FILE_CATEGORIES = [
     id: "image",
     nameKey: "categoryImage",
     replacement: "image",
+    // avif 归入图片类别，上传后按图片嵌入（![...](url)）显示
     extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff", "avif"]
   },
   {
@@ -110,6 +111,9 @@ var DEFAULT_SETTINGS = {
   attachmentRoot: "99 Attachments",
   deletePolicy: "confirm",
   autoDeleteDelayHours: 24,
+  instantUploadEnabled: true,
+  externalUploadEnabled: true,
+  instantUploadMaxSizeMiB: 0,
   s3: DEFAULT_S3,
   enabledExtensions: DEFAULT_ENABLED_EXTS,
   minSizeRules: DEFAULT_MIN_SIZE,
@@ -180,6 +184,7 @@ function mergeSettings(defaults, loaded) {
   };
   return {
     ...defaults,
+    // 恢复已保存的基础设置，修复每次启动都被重置为默认值的问题
     enabled: readBoolean(data.enabled, defaults.enabled),
     autoScanEnabled: readBoolean(data.autoScanEnabled, defaults.autoScanEnabled),
     scanIntervalMinutes: readNonNegativeNumber(data.scanIntervalMinutes, defaults.scanIntervalMinutes),
@@ -188,6 +193,10 @@ function mergeSettings(defaults, loaded) {
     attachmentRoot: readNonEmptyString(data.attachmentRoot, defaults.attachmentRoot),
     deletePolicy: readDeletePolicy(data.deletePolicy, defaults.deletePolicy),
     autoDeleteDelayHours: readNonNegativeNumber(data.autoDeleteDelayHours, defaults.autoDeleteDelayHours),
+    // 立即上传相关设置，旧配置中没有时使用默认值（默认开启）
+    instantUploadEnabled: readBoolean(data.instantUploadEnabled, defaults.instantUploadEnabled),
+    externalUploadEnabled: readBoolean(data.externalUploadEnabled, defaults.externalUploadEnabled),
+    instantUploadMaxSizeMiB: readNonNegativeNumber(data.instantUploadMaxSizeMiB, defaults.instantUploadMaxSizeMiB),
     s3,
     enabledExtensions: migrated.enabledExtensions || data.enabledExtensions || defaults.enabledExtensions,
     minSizeRules: migrated.minSizeRules || data.minSizeRules || defaults.minSizeRules,
@@ -248,7 +257,7 @@ function isInCodeRegion(pos, regions) {
 function extractLocalRefs(text) {
   const refs = [];
   const codeRegions = findCodeRegions(text);
-  const wiki = /!?\[\[([^\]\n]+?)\]\]/g;
+  const wiki = /!?\[\[([^\n]+?)\]\]/g;
   let match;
   while ((match = wiki.exec(text)) !== null) {
     if (isInCodeRegion(match.index, codeRegions))
@@ -269,7 +278,7 @@ function extractLocalRefs(text) {
       label: alias || basename(parsed.path)
     });
   }
-  const markdown = /!?\[([^\]\n]*)\]\(([^)\n]+)\)/g;
+  const markdown = /!?\[([^\]\n]*)\]\(((?:[^()\n]|\([^()\n]*\))+)\)/g;
   while ((match = markdown.exec(text)) !== null) {
     if (isInCodeRegion(match.index, codeRegions))
       continue;
@@ -381,6 +390,7 @@ function contentTypeForExt(ext) {
     heic: "image/heic",
     bmp: "image/bmp",
     tiff: "image/tiff",
+    // avif 使用标准 MIME，便于浏览器直接渲染
     avif: "image/avif",
     mp3: "audio/mpeg",
     m4a: "audio/mp4",
@@ -541,6 +551,51 @@ async function deleteS3Object(config, key) {
   const response = await (0, import_obsidian.requestUrl)({ url, method: "DELETE", headers, throw: false });
   if (response.status >= 400 && response.status !== 404) {
     console.warn(`S3 delete failed for key "${key}" (${response.status}): ${response.text || ""}`);
+  }
+}
+async function headS3Object(config, key) {
+  const endpoint = String(config.endpoint || "").replace(/\/+$/, "");
+  const bucket = config.bucketName;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `${endpoint}/${bucket}/${encodedKey}`;
+  const parsed = new URL(url);
+  const region = config.region || "auto";
+  const amzDate = toAmzDate(/* @__PURE__ */ new Date());
+  const dateStamp = amzDate.slice(0, 8);
+  const emptyHash = await sha256Hex(new Uint8Array(0));
+  const canonicalHeaders = [
+    `host:${parsed.host}`,
+    `x-amz-content-sha256:${emptyHash}`,
+    `x-amz-date:${amzDate}`
+  ].join("\n") + "\n";
+  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+  const canonicalRequest = [
+    "HEAD",
+    parsed.pathname,
+    "",
+    canonicalHeaders,
+    signedHeaders,
+    emptyHash
+  ].join("\n");
+  const credentialScope = `${dateStamp}/${region}/s3/aws4_request`;
+  const canonicalRequestHash = await sha256Hex(new TextEncoder().encode(canonicalRequest));
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, canonicalRequestHash].join("\n");
+  const signingKey = await getSignatureKey(config.secretAccessKey, dateStamp, region, "s3");
+  const signature = await hmacSha256Hex(signingKey, stringToSign);
+  const headers = {
+    "x-amz-content-sha256": emptyHash,
+    "x-amz-date": amzDate,
+    Authorization: `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
+  };
+  try {
+    const response = await (0, import_obsidian.requestUrl)({ url, method: "HEAD", headers, throw: false });
+    if (response.status >= 200 && response.status < 300)
+      return true;
+    if (response.status === 404)
+      return false;
+    return null;
+  } catch {
+    return null;
   }
 }
 async function testS3Connection(config) {
@@ -715,6 +770,17 @@ var I18N = {
     deleteDelayHoursDesc: "Files will be moved to trash after this many hours.",
     automaticScan: "Auto-scan vault periodically",
     automaticScanDesc: "On desktop, scan while Obsidian is open at the configured interval. Mobile does not run background scans.",
+    instantUpload: "Upload immediately after paste or drop",
+    instantUploadDesc: "Attachments pasted or dropped into a note are uploaded in the background right away. The link shows an uploading state and cannot be edited until it is replaced. On failure the local file and link are kept.",
+    externalUpload: "Auto-upload attachments written by external tools",
+    externalUploadDesc: "When AI or other tools write local attachment links into a note, upload them about 10 seconds after the note stops changing. Only files inside the attachment folder are handled, and local files are always removed with a delay.",
+    instantUploadMaxSize: "Immediate upload size limit (MiB)",
+    instantUploadMaxSizeDesc: "Larger files are left to the scheduled scan or manual upload. 0 means no limit.",
+    reuseUnavailableHint: "The object path template has no hash variable, so already uploaded files cannot be reused and will be uploaded again.",
+    statusUploading: "Uploading {count}",
+    uploadingWidget: "Uploading",
+    instantUploadFailed: "Upload failed for {name}; the local link was kept. {error}",
+    retry: "Retry",
     scanInterval: "Scan interval (minutes)",
     scanIntervalDesc: "How often to scan the vault. Default: 30",
     quietSeconds: "Skip recently modified files (seconds)",
@@ -875,6 +941,17 @@ var I18N = {
     deleteDelayHoursDesc: "\u6587\u4EF6\u5C06\u5728\u6307\u5B9A\u5C0F\u65F6\u540E\u79FB\u5165\u56DE\u6536\u7AD9\u3002",
     automaticScan: "\u5B9A\u671F\u81EA\u52A8\u626B\u63CF\u5168\u5E93",
     automaticScanDesc: "\u4EC5\u684C\u9762\u7AEF\u5728 Obsidian \u8FD0\u884C\u671F\u95F4\u6309\u8BBE\u7F6E\u7684\u95F4\u9694\u626B\u63CF\u5E76\u66FF\u6362\u7B26\u5408\u6761\u4EF6\u7684\u9644\u4EF6\uFF0C\u79FB\u52A8\u7AEF\u4E0D\u8FD0\u884C\u540E\u53F0\u626B\u63CF\u3002",
+    instantUpload: "\u7C98\u8D34/\u62D6\u5165\u540E\u7ACB\u5373\u4E0A\u4F20",
+    instantUploadDesc: "\u9644\u4EF6\u7C98\u8D34\u6216\u62D6\u5165\u7B14\u8BB0\u540E\u7ACB\u5373\u5728\u540E\u53F0\u4E0A\u4F20\uFF0C\u4E0A\u4F20\u671F\u95F4\u8BE5\u94FE\u63A5\u663E\u793A\u4E0A\u4F20\u4E2D\u4E14\u4E0D\u53EF\u7F16\u8F91\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u66FF\u6362\u4E3A\u8FDC\u7A0B\u94FE\u63A5\uFF1B\u5931\u8D25\u65F6\u4FDD\u7559\u672C\u5730\u6587\u4EF6\u548C\u94FE\u63A5\u3002",
+    externalUpload: "\u81EA\u52A8\u5904\u7406\u5916\u90E8\u5199\u5165\u7684\u9644\u4EF6",
+    externalUploadDesc: "AI \u7B49\u5DE5\u5177\u76F4\u63A5\u628A\u672C\u5730\u9644\u4EF6\u94FE\u63A5\u5199\u5165\u7B14\u8BB0\u65F6\uFF0C\u5728\u7B14\u8BB0\u7EA6 10 \u79D2\u65E0\u53D8\u5316\u540E\u81EA\u52A8\u4E0A\u4F20\u5E76\u66FF\u6362\u3002\u53EA\u5904\u7406\u9644\u4EF6\u6587\u4EF6\u5939\u5185\u7684\u6587\u4EF6\uFF0C\u672C\u5730\u6587\u4EF6\u4E00\u5F8B\u5EF6\u8FDF\u5220\u9664\u3002",
+    instantUploadMaxSize: "\u7ACB\u5373\u4E0A\u4F20\u5927\u5C0F\u4E0A\u9650\uFF08MiB\uFF09",
+    instantUploadMaxSizeDesc: "\u8D85\u8FC7\u6B64\u5927\u5C0F\u7684\u6587\u4EF6\u7559\u7ED9\u5B9A\u65F6\u626B\u63CF\u6216\u624B\u52A8\u4E0A\u4F20\u3002\u8BBE\u4E3A 0 \u8868\u793A\u4E0D\u9650\u3002",
+    reuseUnavailableHint: "\u5BF9\u8C61\u8DEF\u5F84\u6A21\u677F\u4E0D\u542B hash \u53D8\u91CF\uFF0C\u65E0\u6CD5\u590D\u7528\u5DF2\u4E0A\u4F20\u7684\u6587\u4EF6\uFF0C\u76F8\u540C\u6587\u4EF6\u4F1A\u91CD\u590D\u4E0A\u4F20\u3002",
+    statusUploading: "\u4E0A\u4F20\u4E2D {count}",
+    uploadingWidget: "\u4E0A\u4F20\u4E2D",
+    instantUploadFailed: "{name} \u4E0A\u4F20\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u672C\u5730\u94FE\u63A5\u3002{error}",
+    retry: "\u91CD\u8BD5",
     scanInterval: "\u626B\u63CF\u95F4\u9694\uFF08\u5206\u949F\uFF09",
     scanIntervalDesc: "\u591A\u4E45\u626B\u63CF\u4E00\u6B21\u5168\u5E93\u3002\u9ED8\u8BA4\uFF1A30",
     quietSeconds: "\u8DF3\u8FC7\u6700\u8FD1\u4FEE\u6539\u7684\u6587\u4EF6\uFF08\u79D2\uFF09",
@@ -1854,10 +1931,14 @@ var AttachmentImagebedSettingTab = class extends import_obsidian6.PluginSettingT
     if (!this.plugin.isMobile && this.plugin.settings.deletePolicy === "delayed") {
       new import_obsidian6.Setting(containerEl).setName(t2("deleteDelayHours")).setDesc(t2("deleteDelayHoursDesc")).addText(
         (text) => text.setValue(String(this.plugin.settings.autoDeleteDelayHours)).onChange((value) => {
-          this.plugin.settings.autoDeleteDelayHours = Math.max(0, Number(value) || 24);
+          const hours = Number(value);
+          this.plugin.settings.autoDeleteDelayHours = value.trim() !== "" && Number.isFinite(hours) && hours >= 0 ? hours : 24;
           void debouncedSave();
         })
       );
+    }
+    if (!this.plugin.isMobile) {
+      this.renderInstantUploadSettings(containerEl);
     }
     if (!this.plugin.isMobile) {
       new import_obsidian6.Setting(containerEl).setName(t2("automaticScan")).setDesc(t2("automaticScanDesc")).addToggle(
@@ -1894,6 +1975,44 @@ var AttachmentImagebedSettingTab = class extends import_obsidian6.PluginSettingT
         cls: "setting-item-description"
       });
       hintEl.textContent = t2("mobileHint");
+    }
+  }
+  /**
+   * 渲染立即上传相关设置：粘贴/拖入后立即上传、外部写入自动上传、立即上传大小上限（仅桌面端）。
+   *
+   * @param containerEl 设置页容器
+   */
+  renderInstantUploadSettings(containerEl) {
+    const t2 = makeT4(this.plugin);
+    const save = () => this.plugin.saveSettings();
+    const debouncedSave = debounce(save, 500);
+    new import_obsidian6.Setting(containerEl).setName(t2("instantUpload")).setDesc(t2("instantUploadDesc")).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.instantUploadEnabled).onChange((value) => {
+        this.plugin.settings.instantUploadEnabled = value;
+        void save();
+        this.display();
+      })
+    );
+    new import_obsidian6.Setting(containerEl).setName(t2("externalUpload")).setDesc(t2("externalUploadDesc")).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.externalUploadEnabled).onChange((value) => {
+        this.plugin.settings.externalUploadEnabled = value;
+        void save();
+        this.display();
+      })
+    );
+    if (this.plugin.settings.instantUploadEnabled || this.plugin.settings.externalUploadEnabled) {
+      new import_obsidian6.Setting(containerEl).setName(t2("instantUploadMaxSize")).setDesc(t2("instantUploadMaxSizeDesc")).addText(
+        (text) => text.setValue(String(this.plugin.settings.instantUploadMaxSizeMiB || 0)).onChange((value) => {
+          this.plugin.settings.instantUploadMaxSizeMiB = Math.max(0, Number(value) || 0);
+          void debouncedSave();
+        })
+      );
+    }
+    if (!this.plugin.isContentAddressedTemplate()) {
+      containerEl.createEl("p", {
+        text: t2("reuseUnavailableHint"),
+        cls: "setting-item-description"
+      });
     }
   }
   renderFileTypeSettings(containerEl) {
@@ -2087,6 +2206,625 @@ var AttachmentImagebedSettingTab = class extends import_obsidian6.PluginSettingT
   }
 };
 
+// src/instant-upload.ts
+var import_obsidian7 = require("obsidian");
+var import_state = require("@codemirror/state");
+var import_view = require("@codemirror/view");
+var ARM_POLL_INTERVAL_MS = 300;
+var ARM_WINDOW_MS = 15e3;
+var CREATED_TOLERANCE_MS = 2e3;
+var EXTERNAL_QUIET_MS = 1e4;
+var SELF_WRITE_WINDOW_MS = 5e3;
+var STARTUP_CATCHUP_DELAY_MS = 15e3;
+var addUploadLocks = import_state.StateEffect.define();
+var removeUploadLocks = import_state.StateEffect.define();
+var uploadLockField = import_state.StateField.define({
+  create: () => [],
+  update(locks, tr) {
+    let next = tr.docChanged ? locks.map((lock) => ({
+      ...lock,
+      from: tr.changes.mapPos(lock.from, 1),
+      to: tr.changes.mapPos(lock.to, -1)
+    })) : locks;
+    for (const effect of tr.effects) {
+      if (effect.is(addUploadLocks))
+        next = [...next, ...effect.value];
+      if (effect.is(removeUploadLocks))
+        next = next.filter((lock) => !lock.id.startsWith(effect.value));
+    }
+    return next;
+  }
+});
+var UploadingWidget = class extends import_view.WidgetType {
+  /**
+   * @param label 显示的文案
+   */
+  constructor(label) {
+    super();
+    this.label = label;
+  }
+  /**
+   * 文案相同时复用 DOM，避免闪烁。
+   *
+   * @param other 另一个小组件
+   * @returns 是否可以复用
+   */
+  eq(other) {
+    return other.label === this.label;
+  }
+  /**
+   * 生成带旋转图标的「上传中」标签。
+   *
+   * @returns 小组件 DOM
+   */
+  toDOM() {
+    const wrap = document.createElement("span");
+    wrap.className = "attachment-imagebed-manager-uploading-widget";
+    const spinner = document.createElement("span");
+    spinner.className = "attachment-imagebed-manager-uploading-spinner";
+    wrap.appendChild(spinner);
+    wrap.appendChild(document.createTextNode(this.label));
+    return wrap;
+  }
+  /**
+   * 小组件不响应编辑器内的鼠标与键盘事件。
+   *
+   * @returns 始终忽略事件
+   */
+  ignoreEvent() {
+    return true;
+  }
+};
+function touchesLock(fromA, toA, lock) {
+  if (fromA < lock.to && toA > lock.from)
+    return true;
+  return fromA === toA && fromA > lock.from && fromA < lock.to;
+}
+function buildUploadLockExtension(label) {
+  const decorations = import_view.EditorView.decorations.compute([uploadLockField], (state) => {
+    const ranges = [];
+    for (const lock of state.field(uploadLockField)) {
+      if (lock.from >= lock.to)
+        continue;
+      ranges.push(import_view.Decoration.mark({ class: "attachment-imagebed-manager-uploading-link" }).range(lock.from, lock.to));
+      ranges.push(import_view.Decoration.widget({ widget: new UploadingWidget(label), side: 1 }).range(lock.to));
+    }
+    return import_view.Decoration.set(ranges, true);
+  });
+  const filter = import_state.EditorState.changeFilter.of((tr) => {
+    if (!tr.docChanged)
+      return true;
+    if (!(tr.isUserEvent("input") || tr.isUserEvent("delete") || tr.isUserEvent("move")))
+      return true;
+    const locks = tr.startState.field(uploadLockField, false);
+    if (!locks || locks.length === 0)
+      return true;
+    let blocked = false;
+    tr.changes.iterChangedRanges((fromA, toA) => {
+      if (locks.some((lock) => touchesLock(fromA, toA, lock)))
+        blocked = true;
+    });
+    return !blocked;
+  });
+  return [uploadLockField, decorations, filter];
+}
+var InstantUploadManager = class {
+  /**
+   * @param plugin 插件实例
+   */
+  constructor(plugin) {
+    this.plugin = plugin;
+  }
+  /** 正在立即上传的附件路径，外部写入流程与定时扫描遇到时跳过 */
+  inflightPaths = /* @__PURE__ */ new Set();
+  /** 外部写入防抖计时器，按笔记路径区分 */
+  externalTimers = /* @__PURE__ */ new Map();
+  /** 正在处理外部写入的笔记路径，避免同一笔记并发处理 */
+  externalRunning = /* @__PURE__ */ new Set();
+  /** 本插件自己写回笔记的路径与时间，避免触发外部写入流程 */
+  selfWrites = /* @__PURE__ */ new Map();
+  /** 全部定时器，卸载时统一清理 */
+  timers = /* @__PURE__ */ new Set();
+  /** 状态栏「上传中」提示 */
+  statusBarEl = null;
+  /** 锁定标识自增序号 */
+  lockSeq = 0;
+  // region 注册与清理
+  /**
+   * 注册编辑器扩展、粘贴/拖入与文件修改事件、状态栏与启动补处理，仅桌面端调用。
+   */
+  register() {
+    const { plugin } = this;
+    plugin.registerEditorExtension(buildUploadLockExtension(plugin.t("uploadingWidget")));
+    this.statusBarEl = plugin.addStatusBarItem();
+    this.statusBarEl.addClass("attachment-imagebed-manager-statusbar");
+    this.refreshStatusBar();
+    plugin.registerEvent(
+      plugin.app.workspace.on("editor-paste", (_evt, editor, info) => {
+        this.arm(editor, info);
+      })
+    );
+    plugin.registerEvent(
+      plugin.app.workspace.on("editor-drop", (_evt, editor, info) => {
+        this.arm(editor, info);
+      })
+    );
+    plugin.registerEvent(
+      plugin.app.vault.on("modify", (file) => {
+        this.onVaultModify(file);
+      })
+    );
+    plugin.app.workspace.onLayoutReady(() => {
+      this.setTimer(() => {
+        void this.runStartupCatchup();
+      }, STARTUP_CATCHUP_DELAY_MS);
+    });
+  }
+  /**
+   * 卸载插件时清理全部定时器。
+   */
+  dispose() {
+    for (const id of this.timers)
+      window.clearTimeout(id);
+    this.timers.clear();
+    this.externalTimers.clear();
+  }
+  // endregion
+  // region 粘贴/拖入即上传
+  /**
+   * 粘贴/拖入发生后开启一次监听会话，在编辑器中等待新增的本地附件链接出现。
+   *
+   * @param editor 发生粘贴/拖入的编辑器
+   * @param info 编辑器所属视图或文件信息
+   */
+  arm(editor, info) {
+    const { settings } = this.plugin;
+    if (!settings.enabled || !settings.instantUploadEnabled)
+      return;
+    const noteFile = info.file;
+    if (!(noteFile instanceof import_obsidian7.TFile) || noteFile.extension !== "md")
+      return;
+    if (!this.isS3Ready())
+      return;
+    const session = {
+      noteFile,
+      editor,
+      startedAt: Date.now(),
+      baseline: this.collectReferencedPaths(editor.getValue(), noteFile),
+      handled: /* @__PURE__ */ new Set()
+    };
+    const poll = () => {
+      this.pollSession(session);
+      if (Date.now() - session.startedAt < ARM_WINDOW_MS)
+        this.setTimer(poll, ARM_POLL_INTERVAL_MS);
+    };
+    this.setTimer(poll, ARM_POLL_INTERVAL_MS);
+  }
+  /**
+   * 扫描编辑器当前内容，找出本次粘贴/拖入新增的本地附件链接并开始上传。
+   *
+   * @param session 监听会话
+   */
+  pollSession(session) {
+    const view = this.getEditorView(session.editor);
+    if (!view || !this.isEditorShowing(session.editor, session.noteFile))
+      return;
+    const text = session.editor.getValue();
+    for (const ref of extractLocalRefs(text)) {
+      const file = this.plugin.resolveLinkedFile(ref.target, session.noteFile);
+      if (!file || !this.isInstantUploadable(file))
+        continue;
+      if (session.baseline.has(file.path) || session.handled.has(file.path) || this.inflightPaths.has(file.path))
+        continue;
+      session.handled.add(file.path);
+      const isNewFile = file.stat.ctime >= session.startedAt - CREATED_TOLERANCE_MS;
+      void this.uploadInEditor(session.noteFile, session.editor, file, ref, isNewFile);
+    }
+  }
+  /**
+   * 锁定编辑器中的链接并上传附件，完成后只替换这条链接，再按删除策略处理本地文件。
+   *
+   * @param noteFile 链接所在笔记
+   * @param editor 链接所在编辑器
+   * @param file 待上传的附件
+   * @param ref 链接信息
+   * @param isNewFile 附件是否为本次粘贴/拖入新建
+   * @returns 上传结果
+   */
+  async uploadInEditor(noteFile, editor, file, ref, isNewFile) {
+    const { plugin } = this;
+    const lockId = `aim-${++this.lockSeq}`;
+    const view = this.getEditorView(editor);
+    if (view) {
+      const locks = this.findOccurrences(view.state.doc.toString(), ref.raw).map((from, index) => ({
+        id: `${lockId}:${index}`,
+        from,
+        to: from + ref.raw.length
+      }));
+      if (locks.length)
+        view.dispatch({ effects: addUploadLocks.of(locks) });
+    }
+    this.inflightPaths.add(file.path);
+    this.refreshStatusBar();
+    let upload = null;
+    try {
+      upload = await plugin.uploadFile(file);
+      const replacement = plugin.buildReplacement(ref, this.toCandidate(file, ref), upload.publicUrl);
+      const replaced = await this.replaceInNote(noteFile, ref.raw, replacement, lockId);
+      if (replaced === 0) {
+        if (upload.created)
+          await deleteS3Object(plugin.settings.s3, upload.key).catch(() => {
+          });
+        plugin.addLog({ status: "instant-upload-link-removed", notePath: noteFile.path, sourcePath: file.path, remoteUrl: upload.publicUrl, trashed: false });
+        await plugin.saveSettings();
+        return "link-removed";
+      }
+      const record = { path: file.path, name: file.name, remoteUrl: upload.publicUrl };
+      if (!isNewFile) {
+        plugin.addLog({ status: "instant-upload-reused-kept-local", notePath: noteFile.path, sourcePath: file.path, remoteUrl: upload.publicUrl, trashed: false });
+        await plugin.saveSettings();
+      } else if (plugin.settings.deletePolicy === "immediate") {
+        await plugin.deleteLocalFileRecords(noteFile, [record], "instant-upload-trashed");
+      } else {
+        plugin.scheduleDelayedDeletes(noteFile, [record]);
+        await plugin.saveSettings();
+      }
+      return "replaced";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Instant upload failed for ${file.path}:`, error);
+      plugin.addLog({ status: "instant-upload-failed", notePath: noteFile.path, sourcePath: file.path, remoteUrl: upload?.publicUrl || "", trashed: false });
+      await plugin.saveSettings();
+      this.notifyFailure(noteFile, editor, file, ref, isNewFile, message);
+      return "failed";
+    } finally {
+      this.removeLocks(editor, lockId);
+      this.inflightPaths.delete(file.path);
+      this.refreshStatusBar();
+    }
+  }
+  /**
+   * 上传失败时提示，并提供重试按钮。
+   *
+   * @param noteFile 链接所在笔记
+   * @param editor 链接所在编辑器
+   * @param file 上传失败的附件
+   * @param ref 链接信息
+   * @param isNewFile 附件是否为本次新建
+   * @param message 失败原因
+   */
+  notifyFailure(noteFile, editor, file, ref, isNewFile, message) {
+    const { plugin } = this;
+    const fragment = createFragment((el) => {
+      el.createSpan({ text: plugin.t("instantUploadFailed", { name: file.name, error: message }) });
+      const button = el.createEl("button", { text: plugin.t("retry"), cls: "attachment-imagebed-manager-retry" });
+      button.addEventListener("click", () => {
+        if (plugin.app.vault.getAbstractFileByPath(file.path) instanceof import_obsidian7.TFile) {
+          void this.uploadInEditor(noteFile, editor, file, ref, isNewFile);
+        }
+      });
+    });
+    new import_obsidian7.Notice(fragment, 1e4);
+  }
+  // endregion
+  // region 外部写入自动上传
+  /**
+   * 笔记被修改时防抖，笔记连续 10 秒无变化后再处理其中的本地附件。
+   *
+   * @param file 被修改的文件
+   */
+  onVaultModify(file) {
+    const { settings } = this.plugin;
+    if (!settings.enabled || !settings.externalUploadEnabled)
+      return;
+    if (!(file instanceof import_obsidian7.TFile) || file.extension !== "md")
+      return;
+    const selfWriteAt = this.selfWrites.get(file.path);
+    if (selfWriteAt && Date.now() - selfWriteAt < SELF_WRITE_WINDOW_MS)
+      return;
+    const existing = this.externalTimers.get(file.path);
+    if (existing)
+      this.clearTimer(existing);
+    const timer = this.setTimer(() => {
+      this.externalTimers.delete(file.path);
+      void this.processExternalNote(file);
+    }, EXTERNAL_QUIET_MS);
+    this.externalTimers.set(file.path, timer);
+  }
+  /**
+   * 启动后补处理一次全库，覆盖 Obsidian 关闭期间外部工具写入的附件。
+   */
+  async runStartupCatchup() {
+    const { settings } = this.plugin;
+    if (!settings.enabled || !settings.externalUploadEnabled || !this.isS3Ready())
+      return;
+    for (const noteFile of this.plugin.app.vault.getMarkdownFiles()) {
+      await this.processExternalNote(noteFile);
+    }
+  }
+  /**
+   * 处理外部写入笔记中的本地附件：上传后按链接原文替换，本地文件一律延迟删除。
+   *
+   * @param noteFile 待处理的笔记
+   */
+  async processExternalNote(noteFile) {
+    const { plugin } = this;
+    if (!plugin.settings.enabled || !plugin.settings.externalUploadEnabled)
+      return;
+    if (this.externalRunning.has(noteFile.path) || !this.isS3Ready())
+      return;
+    if (Date.now() - noteFile.stat.mtime < EXTERNAL_QUIET_MS) {
+      this.onVaultModify(noteFile);
+      return;
+    }
+    this.externalRunning.add(noteFile.path);
+    try {
+      const candidates = await plugin.findCandidatesInNote(noteFile, {
+        requireAutoCandidate: true,
+        enforceAttachmentRoot: true,
+        enforceSizeRule: true
+      });
+      let changed = false;
+      for (const candidate of candidates) {
+        const file = candidate.file;
+        if (this.inflightPaths.has(file.path))
+          continue;
+        if (Date.now() - file.stat.mtime < EXTERNAL_QUIET_MS)
+          continue;
+        if (this.exceedsInstantLimit(file))
+          continue;
+        this.inflightPaths.add(file.path);
+        this.refreshStatusBar();
+        try {
+          const upload = await plugin.uploadFile(file);
+          let replaced = 0;
+          for (const ref of candidate.refs) {
+            replaced += await this.replaceInNote(noteFile, ref.raw, plugin.buildReplacement(ref, candidate, upload.publicUrl));
+          }
+          if (replaced === 0) {
+            if (upload.created)
+              await deleteS3Object(plugin.settings.s3, upload.key).catch(() => {
+              });
+            continue;
+          }
+          changed = true;
+          plugin.scheduleDelayedDeletes(noteFile, [{ path: file.path, name: file.name, remoteUrl: upload.publicUrl }]);
+          plugin.addLog({ status: "external-upload-replaced", notePath: noteFile.path, sourcePath: file.path, remoteUrl: upload.publicUrl, trashed: false });
+        } catch (error) {
+          console.error(`External upload failed for ${file.path}:`, error);
+          plugin.addLog({ status: "external-upload-failed", notePath: noteFile.path, sourcePath: file.path, remoteUrl: "", trashed: false });
+        } finally {
+          this.inflightPaths.delete(file.path);
+          this.refreshStatusBar();
+        }
+      }
+      if (changed || candidates.length)
+        await plugin.saveSettings();
+    } catch (error) {
+      console.error(`External upload scan failed for ${noteFile.path}:`, error);
+    } finally {
+      this.externalRunning.delete(noteFile.path);
+    }
+  }
+  // endregion
+  // region 链接替换
+  /**
+   * 在笔记中把指定链接原文替换为远程链接：笔记已在编辑器中打开时通过编辑器替换，否则直接改文件。
+   * 只替换这条链接本身，笔记其他内容在上传期间被修改也不影响。
+   *
+   * @param noteFile 链接所在笔记
+   * @param raw 链接原文
+   * @param replacement 替换后的远程链接
+   * @param lockId 立即上传的锁定标识，有值时优先替换锁定区间
+   * @returns 实际替换的数量，0 表示链接已不存在
+   */
+  async replaceInNote(noteFile, raw, replacement, lockId) {
+    const view = this.findOpenEditorView(noteFile);
+    if (view) {
+      const doc = view.state.doc.toString();
+      const locked = lockId ? view.state.field(uploadLockField, false)?.filter((lock) => lock.id.startsWith(lockId) && doc.slice(lock.from, lock.to) === raw).map((lock) => lock.from) || [] : [];
+      const positions = locked.length ? locked : this.findOccurrences(doc, raw);
+      if (positions.length === 0)
+        return 0;
+      view.dispatch({
+        changes: positions.map((from) => ({ from, to: from + raw.length, insert: replacement })),
+        effects: lockId ? removeUploadLocks.of(lockId) : []
+      });
+      this.selfWrites.set(noteFile.path, Date.now());
+      return positions.length;
+    }
+    let count = 0;
+    await this.plugin.app.vault.process(noteFile, (current) => {
+      count = this.findOccurrences(current, raw).length;
+      return count ? replaceAllLiteral(current, raw, replacement) : current;
+    });
+    if (count)
+      this.selfWrites.set(noteFile.path, Date.now());
+    return count;
+  }
+  /**
+   * 解除指定上传的锁定区间。
+   *
+   * @param editor 链接所在编辑器
+   * @param lockId 锁定标识
+   */
+  removeLocks(editor, lockId) {
+    const view = this.getEditorView(editor);
+    if (!view)
+      return;
+    try {
+      const locks = view.state.field(uploadLockField, false);
+      if (locks?.some((lock) => lock.id.startsWith(lockId))) {
+        view.dispatch({ effects: removeUploadLocks.of(lockId) });
+      }
+    } catch {
+    }
+  }
+  // endregion
+  // region 工具方法
+  /**
+   * 判断附件是否可以立即上传：已启用的类型、不是笔记、不超过立即上传大小上限。
+   *
+   * @param file 附件
+   * @returns 是否可以立即上传
+   */
+  isInstantUploadable(file) {
+    const ext = file.extension.toLowerCase();
+    if (ext === "md")
+      return false;
+    if (!this.plugin.settings.enabledExtensions.includes(ext))
+      return false;
+    return !this.exceedsInstantLimit(file);
+  }
+  /**
+   * 判断附件是否超过立即上传大小上限。
+   *
+   * @param file 附件
+   * @returns 超过上限返回 true，上限为 0 表示不限
+   */
+  exceedsInstantLimit(file) {
+    const limitMiB = Number(this.plugin.settings.instantUploadMaxSizeMiB) || 0;
+    return limitMiB > 0 && file.stat.size > limitMiB * 1024 * 1024;
+  }
+  /**
+   * 判断 S3 配置是否完整。
+   *
+   * @returns 配置完整返回 true
+   */
+  isS3Ready() {
+    try {
+      this.plugin.ensureS3Settings();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /**
+   * 收集笔记文本中已引用的本地附件路径。
+   *
+   * @param text 笔记文本
+   * @param noteFile 笔记文件
+   * @returns 附件路径集合
+   */
+  collectReferencedPaths(text, noteFile) {
+    const paths = /* @__PURE__ */ new Set();
+    for (const ref of extractLocalRefs(text)) {
+      const file = this.plugin.resolveLinkedFile(ref.target, noteFile);
+      if (file)
+        paths.add(file.path);
+    }
+    return paths;
+  }
+  /**
+   * 查找文本中某段原文的全部出现位置。
+   *
+   * @param text 文本
+   * @param raw 原文
+   * @returns 起始位置列表
+   */
+  findOccurrences(text, raw) {
+    const positions = [];
+    if (!raw)
+      return positions;
+    let index = text.indexOf(raw);
+    while (index !== -1) {
+      positions.push(index);
+      index = text.indexOf(raw, index + raw.length);
+    }
+    return positions;
+  }
+  /**
+   * 构造生成替换链接所需的候选信息。
+   *
+   * @param file 附件
+   * @param ref 链接信息
+   * @returns 候选信息
+   */
+  toCandidate(file, ref) {
+    const ext = file.extension.toLowerCase();
+    return {
+      file,
+      ext,
+      replacement: getReplacementForExt(ext, this.plugin.settings),
+      refs: [ref],
+      referenceCount: 1,
+      sizeBytes: file.stat.size
+    };
+  }
+  /**
+   * 获取 Obsidian 编辑器底层的 CodeMirror 视图。
+   *
+   * @param editor Obsidian 编辑器
+   * @returns CodeMirror 视图，旧版编辑器返回 null
+   */
+  getEditorView(editor) {
+    const view = editor.cm;
+    return view instanceof import_view.EditorView ? view : null;
+  }
+  /**
+   * 判断编辑器当前是否仍在显示指定笔记。
+   *
+   * @param editor 编辑器
+   * @param noteFile 笔记
+   * @returns 仍在显示返回 true
+   */
+  isEditorShowing(editor, noteFile) {
+    return this.plugin.app.workspace.getLeavesOfType("markdown").some((leaf) => leaf.view instanceof import_obsidian7.MarkdownView && leaf.view.editor === editor && leaf.view.file?.path === noteFile.path);
+  }
+  /**
+   * 查找正在显示指定笔记的编辑器视图。
+   *
+   * @param noteFile 笔记
+   * @returns CodeMirror 视图，笔记未打开时返回 null
+   */
+  findOpenEditorView(noteFile) {
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (view instanceof import_obsidian7.MarkdownView && view.file?.path === noteFile.path) {
+        const cm = this.getEditorView(view.editor);
+        if (cm)
+          return cm;
+      }
+    }
+    return null;
+  }
+  /**
+   * 刷新状态栏：有上传任务时显示数量，否则隐藏。
+   */
+  refreshStatusBar() {
+    if (!this.statusBarEl)
+      return;
+    const count = this.inflightPaths.size;
+    this.statusBarEl.setText(count ? `\u2601 ${this.plugin.t("statusUploading", { count })}` : "");
+    this.statusBarEl.toggleClass("attachment-imagebed-manager-statusbar-hidden", count === 0);
+  }
+  /**
+   * 创建一次性定时器并登记，便于卸载时统一清理。
+   *
+   * @param callback 回调
+   * @param ms 延迟毫秒数
+   * @returns 定时器标识
+   */
+  setTimer(callback, ms) {
+    const id = window.setTimeout(() => {
+      this.timers.delete(id);
+      callback();
+    }, ms);
+    this.timers.add(id);
+    return id;
+  }
+  /**
+   * 取消已登记的定时器。
+   *
+   * @param id 定时器标识
+   */
+  clearTimer(id) {
+    window.clearTimeout(id);
+    this.timers.delete(id);
+  }
+  // endregion
+};
+
 // src/auto-scan-policy.ts
 function shouldScheduleAutoScan(input) {
   return !input.isMobile && input.enabled && input.autoScanEnabled && !input.running;
@@ -2107,15 +2845,17 @@ function meetsAutoScanSize(sizeBytes, minMiB) {
 }
 
 // src/plugin.ts
-var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
+var AttachmentImagebedManagerPlugin = class extends import_obsidian8.Plugin {
   locale;
   autoScanTimer = null;
   autoScanRunning = false;
   isMobile = false;
+  /** 粘贴/拖入即上传与外部写入自动上传，仅桌面端创建 */
+  instantUploader = null;
   async onload() {
     await this.loadSettings();
-    this.locale = detectLocaleFromApp(import_obsidian7.getLanguage);
-    this.isMobile = import_obsidian7.Platform.isMobile;
+    this.locale = detectLocaleFromApp(import_obsidian8.getLanguage);
+    this.isMobile = import_obsidian8.Platform.isMobile;
     this.addRibbonIcon("upload-cloud", this.t("ribbonScan"), () => {
       void this.scanCurrentNote();
     });
@@ -2158,10 +2898,15 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
       );
     }
     this.configureAutoScan();
+    if (!this.isMobile) {
+      this.instantUploader = new InstantUploadManager(this);
+      this.instantUploader.register();
+    }
   }
   onunload() {
     if (this.autoScanTimer)
       window.clearInterval(this.autoScanTimer);
+    this.instantUploader?.dispose();
   }
   async loadSettings() {
     const loaded = await this.loadData();
@@ -2189,24 +2934,24 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
     this.autoScanTimer = window.setInterval(() => {
       this.runAutoScan().catch((error) => {
         console.error("Auto scan failed", error);
-        new import_obsidian7.Notice(this.t("autoScanFailed", { error: error instanceof Error ? error.message : String(error) }));
+        new import_obsidian8.Notice(this.t("autoScanFailed", { error: error instanceof Error ? error.message : String(error) }));
       });
     }, minutes * 60 * 1e3);
   }
   async scanCurrentNote() {
     if (!this.settings.enabled) {
-      new import_obsidian7.Notice(this.t("disabled"));
+      new import_obsidian8.Notice(this.t("disabled"));
       return;
     }
     const activeFile = this.app.workspace.getActiveFile();
     if (!activeFile || activeFile.extension !== "md") {
-      new import_obsidian7.Notice(this.t("openMarkdownFirst"));
+      new import_obsidian8.Notice(this.t("openMarkdownFirst"));
       return;
     }
     try {
       this.ensureS3Settings();
     } catch (error) {
-      new import_obsidian7.Notice(error instanceof Error ? error.message : String(error));
+      new import_obsidian8.Notice(error instanceof Error ? error.message : String(error));
       return;
     }
     const candidates = await this.findCandidatesInNote(activeFile, {
@@ -2217,14 +2962,14 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
       includeCoverReferences: true
     });
     if (candidates.length === 0) {
-      new import_obsidian7.Notice(this.t("noCandidates"));
+      new import_obsidian8.Notice(this.t("noCandidates"));
       return;
     }
     new CandidateModal(this.app, this, activeFile, candidates).open();
   }
   async scanVaultDryRun() {
     const files = this.app.vault.getMarkdownFiles();
-    const notice = new import_obsidian7.Notice(this.t("scanningVault", { current: 0, total: files.length }), 0);
+    const notice = new import_obsidian8.Notice(this.t("scanningVault", { current: 0, total: files.length }), 0);
     const plan = await this.scanVaultPlan((state) => {
       notice.setMessage(this.t("scanningVault", { current: state.current, total: state.total }));
     });
@@ -2233,18 +2978,18 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
   }
   async openVaultBatch() {
     if (!this.settings.enabled) {
-      new import_obsidian7.Notice(this.t("disabled"));
+      new import_obsidian8.Notice(this.t("disabled"));
       return;
     }
     const files = this.app.vault.getMarkdownFiles();
-    const notice = new import_obsidian7.Notice(this.t("scanningVault", { current: 0, total: files.length }), 0);
+    const notice = new import_obsidian8.Notice(this.t("scanningVault", { current: 0, total: files.length }), 0);
     try {
       const plan = await this.scanVaultPlan((state) => {
         notice.setMessage(this.t("scanningVault", { current: state.current, total: state.total }));
       });
       notice.hide();
       if (!plan.items.length) {
-        new import_obsidian7.Notice(this.t("noVaultCandidates"));
+        new import_obsidian8.Notice(this.t("noVaultCandidates"));
         return;
       }
       new VaultBatchModal(this.app, this, plan).open();
@@ -2252,23 +2997,23 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
       notice.hide();
       const message = error instanceof Error ? error.message : String(error);
       console.error("Vault scan failed", error);
-      new import_obsidian7.Notice(this.t("vaultScanFailed", { error: message }), 1e4);
+      new import_obsidian8.Notice(this.t("vaultScanFailed", { error: message }), 1e4);
     }
   }
   async openFilteredVaultBatch() {
     if (!this.settings.enabled) {
-      new import_obsidian7.Notice(this.t("disabled"));
+      new import_obsidian8.Notice(this.t("disabled"));
       return;
     }
     const files = this.app.vault.getMarkdownFiles();
-    const notice = new import_obsidian7.Notice(this.t("scanningVault", { current: 0, total: files.length }), 0);
+    const notice = new import_obsidian8.Notice(this.t("scanningVault", { current: 0, total: files.length }), 0);
     try {
       const plan = await this.scanVaultPlan((state) => {
         notice.setMessage(this.t("scanningVault", { current: state.current, total: state.total }));
       });
       notice.hide();
       if (!plan.items.length) {
-        new import_obsidian7.Notice(this.t("noVaultCandidates"));
+        new import_obsidian8.Notice(this.t("noVaultCandidates"));
         return;
       }
       new VaultBatchFilterModal(this.app, this, plan).open();
@@ -2276,7 +3021,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
       notice.hide();
       const message = error instanceof Error ? error.message : String(error);
       console.error("Filtered vault scan failed", error);
-      new import_obsidian7.Notice(this.t("vaultScanFailed", { error: message }), 1e4);
+      new import_obsidian8.Notice(this.t("vaultScanFailed", { error: message }), 1e4);
     }
   }
   async scanVaultPlan(onProgress) {
@@ -2409,7 +3154,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
         const record = deletable[i];
         const notePath = this.firstReferencingNote(record.path, plan) || "vault-batch";
         const file = this.app.vault.getAbstractFileByPath(record.path);
-        if (!(file instanceof import_obsidian7.TFile))
+        if (!(file instanceof import_obsidian8.TFile))
           continue;
         try {
           await this.deleteLocalFileRecords({ path: notePath }, [record], "manual-delete");
@@ -2426,7 +3171,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
         const record = deletable[i];
         const notePath = this.firstReferencingNote(record.path, plan) || "vault-batch";
         const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-        this.scheduleDelayedDeletes(noteFile instanceof import_obsidian7.TFile ? noteFile : { path: notePath }, [record]);
+        this.scheduleDelayedDeletes(noteFile instanceof import_obsidian8.TFile ? noteFile : { path: notePath }, [record]);
         scheduledFiles += 1;
         onProgress?.({ phase: "scheduling", current: i + 1, total: deletable.length, notePath, label: record.name });
       }
@@ -2487,6 +3232,8 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
             enforceSizeRule: true
           });
           const quietCandidates = candidates.filter((c) => {
+            if (this.instantUploader?.inflightPaths.has(c.file.path))
+              return false;
             if (!this.isQuiet(c.file))
               return false;
             if (!meetsAutoScanSize(c.sizeBytes, this.settings.autoScanMinSizeMiB))
@@ -2504,7 +3251,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
         }
       }
       if (replaced > 0)
-        new import_obsidian7.Notice(this.t("autoScanReplaced", { count: replaced }));
+        new import_obsidian8.Notice(this.t("autoScanReplaced", { count: replaced }));
     } finally {
       this.autoScanRunning = false;
     }
@@ -2518,7 +3265,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
     const byKey = /* @__PURE__ */ new Map();
     for (const ref of refs) {
       const targetFile = this.resolveLinkedFile(ref.target, noteFile);
-      if (!targetFile || !(targetFile instanceof import_obsidian7.TFile))
+      if (!targetFile || !(targetFile instanceof import_obsidian8.TFile))
         continue;
       if (options.enforceAttachmentRoot !== false && !this.isUnderAttachmentRoot(targetFile))
         continue;
@@ -2560,15 +3307,15 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
       decoded = target;
     }
     const direct = this.app.vault.getAbstractFileByPath(decoded);
-    if (direct instanceof import_obsidian7.TFile)
+    if (direct instanceof import_obsidian8.TFile)
       return direct;
     const fromCache = this.app.metadataCache.getFirstLinkpathDest(decoded, noteFile.path);
-    if (fromCache instanceof import_obsidian7.TFile)
+    if (fromCache instanceof import_obsidian8.TFile)
       return fromCache;
     const noteDir = noteFile.parent ? noteFile.parent.path : "";
     const relativePath = noteDir ? `${noteDir}/${decoded}` : decoded;
     const relative = this.app.vault.getAbstractFileByPath(relativePath);
-    return relative instanceof import_obsidian7.TFile ? relative : null;
+    return relative instanceof import_obsidian8.TFile ? relative : null;
   }
   isUnderAttachmentRoot(file) {
     const root = trimSlashes(this.settings.attachmentRoot || "99 Attachments");
@@ -2618,7 +3365,8 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
           });
           upload = await this.uploadCandidate(candidate);
           uploaded.set(candidate.file.path, upload);
-          uploadedKeys.push(upload.key);
+          if (upload.created)
+            uploadedKeys.push(upload.key);
           if (options.uploadCache) {
             options.uploadCache.set(candidate.file.path, upload);
             newlyCachedPaths.push(candidate.file.path);
@@ -2725,16 +3473,30 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
     return { replaced, localFiles, deleteMode, deletionStatus };
   }
   async uploadCandidate(candidate) {
-    const binary = await this.app.vault.readBinary(candidate.file);
+    return this.uploadFile(candidate.file);
+  }
+  /**
+   * 上传单个附件，对象键含内容哈希且云端已存在时直接复用，不重复上传。
+   *
+   * @param file 待上传的附件
+   * @returns 对象键、公开地址，以及本次是否新建了云端对象
+   */
+  async uploadFile(file) {
+    const binary = await this.app.vault.readBinary(file);
     const body = new Uint8Array(binary);
     const hash = await sha256Hex(body);
-    const ext = candidate.file.extension.toLowerCase();
+    const ext = file.extension.toLowerCase();
     const key = renderPathTemplate(this.settings.s3.pathTemplate, {
       ext,
       hash,
       hash2: hash.slice(0, 2),
-      filename: safeFilename(candidate.file.name)
+      filename: safeFilename(file.name)
     });
+    const publicUrl = buildPublicUrl(this.settings.s3.customDomainName, key);
+    const exists = await headS3Object(this.settings.s3, key);
+    if (exists === true && this.isContentAddressedTemplate()) {
+      return { key, publicUrl, created: false };
+    }
     const contentType = contentTypeForExt(ext);
     await putS3Object(
       this.settings.s3,
@@ -2744,7 +3506,16 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
       (status, text) => this.t("uploadFailed", { status, text }),
       hash
     );
-    return { key, publicUrl: buildPublicUrl(this.settings.s3.customDomainName, key) };
+    return { key, publicUrl, created: exists === false };
+  }
+  /**
+   * 判断对象路径模板是否以内容哈希命名，只有这种情况下同名对象才能安全复用。
+   *
+   * @returns 路径模板包含 {hash} 时返回 true
+   */
+  isContentAddressedTemplate() {
+    const template = this.settings.s3.pathTemplate || "attachments/{ext}/{hash2}/{hash}.{ext}";
+    return template.includes("{hash}");
   }
   getEffectiveDeleteMode(requested) {
     const mode = requested || this.settings.deletePolicy || "confirm";
@@ -2804,7 +3575,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
   async deleteLocalFileRecords(noteFile, localFiles, status) {
     for (const fileRecord of localFiles) {
       const file = this.app.vault.getAbstractFileByPath(fileRecord.path);
-      if (!(file instanceof import_obsidian7.TFile)) {
+      if (!(file instanceof import_obsidian8.TFile)) {
         this.addLog({
           status: `${status}-missing-local-file`,
           notePath: noteFile.path,
@@ -2854,7 +3625,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian7.Plugin {
         }
         const noteFile = this.app.vault.getAbstractFileByPath(entry.notePath);
         await this.deleteLocalFileRecords(
-          noteFile instanceof import_obsidian7.TFile ? noteFile : { path: entry.notePath },
+          noteFile instanceof import_obsidian8.TFile ? noteFile : { path: entry.notePath },
           [{ path: entry.sourcePath, name: basename2(entry.sourcePath), remoteUrl: entry.remoteUrl }],
           "delayed-delete"
         );

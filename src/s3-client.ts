@@ -162,6 +162,63 @@ export async function deleteS3Object(config: S3Config, key: string): Promise<voi
   }
 }
 
+/**
+ * 查询对象是否已存在于存储桶中，用于上传前查重复用。
+ *
+ * @param config S3 连接配置
+ * @param key 对象键
+ * @returns 存在返回 true，不存在返回 false，无法判断（网络错误、无权限等）返回 null
+ */
+export async function headS3Object(config: S3Config, key: string): Promise<boolean | null> {
+  const endpoint = String(config.endpoint || "").replace(/\/+$/, "");
+  const bucket = config.bucketName;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `${endpoint}/${bucket}/${encodedKey}`;
+  const parsed = new URL(url);
+  const region = config.region || "auto";
+
+  // 按 SigV4 规范构造 HEAD 请求签名，HEAD 请求体为空
+  const amzDate = toAmzDate(new Date());
+  const dateStamp = amzDate.slice(0, 8);
+  const emptyHash = await sha256Hex(new Uint8Array(0));
+  const canonicalHeaders =
+    [
+      `host:${parsed.host}`,
+      `x-amz-content-sha256:${emptyHash}`,
+      `x-amz-date:${amzDate}`,
+    ].join("\n") + "\n";
+  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+  const canonicalRequest = [
+    "HEAD",
+    parsed.pathname,
+    "",
+    canonicalHeaders,
+    signedHeaders,
+    emptyHash,
+  ].join("\n");
+  const credentialScope = `${dateStamp}/${region}/s3/aws4_request`;
+  const canonicalRequestHash = await sha256Hex(new TextEncoder().encode(canonicalRequest));
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, canonicalRequestHash].join("\n");
+  const signingKey = await getSignatureKey(config.secretAccessKey, dateStamp, region, "s3");
+  const signature = await hmacHex(signingKey, stringToSign);
+  const headers: Record<string, string> = {
+    "x-amz-content-sha256": emptyHash,
+    "x-amz-date": amzDate,
+    Authorization: `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+  };
+
+  try {
+    const response = await requestUrl({ url, method: "HEAD", headers, throw: false });
+    // 2xx 表示对象已存在，404 表示不存在，其余状态无法判断
+    if (response.status >= 200 && response.status < 300) return true;
+    if (response.status === 404) return false;
+    return null;
+  } catch {
+    // 网络异常时无法判断，交由调用方按「未知」处理
+    return null;
+  }
+}
+
 export async function testS3Connection(config: S3Config): Promise<void> {
   const endpoint = String(config.endpoint || "").replace(/\/+$/, "");
   const bucket = config.bucketName;

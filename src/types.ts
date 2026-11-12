@@ -24,6 +24,12 @@ export interface PluginSettings {
   attachmentRoot: string;
   deletePolicy: DeletePolicy;
   autoDeleteDelayHours: number;
+  /** 粘贴或拖入附件后立即在后台上传并替换链接（仅桌面端） */
+  instantUploadEnabled: boolean;
+  /** 自动处理 AI 等外部工具直接写入笔记的本地附件（仅桌面端） */
+  externalUploadEnabled: boolean;
+  /** 立即上传的文件大小上限（MiB），0 表示不限，超过的文件留给定时扫描或手动上传 */
+  instantUploadMaxSizeMiB: number;
   s3: S3Config;
   enabledExtensions: string[];
   minSizeRules: Record<string, number>;
@@ -97,6 +103,8 @@ export interface VaultBatchProgress {
 export interface UploadResult {
   key: string;
   publicUrl: string;
+  /** 本次操作是否新建了云端对象；复用或覆盖已有对象时为 false，回滚时只删除新建的对象 */
+  created: boolean;
 }
 
 export interface LocalFileRecord {

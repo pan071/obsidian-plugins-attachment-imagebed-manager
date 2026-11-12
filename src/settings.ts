@@ -42,6 +42,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   attachmentRoot: "99 Attachments",
   deletePolicy: "confirm",
   autoDeleteDelayHours: 24,
+  instantUploadEnabled: true,
+  externalUploadEnabled: true,
+  instantUploadMaxSizeMiB: 0,
   s3: DEFAULT_S3,
   enabledExtensions: DEFAULT_ENABLED_EXTS,
   minSizeRules: DEFAULT_MIN_SIZE,
@@ -83,6 +86,9 @@ interface LoadedSettings {
   attachmentRoot?: unknown;
   deletePolicy?: unknown;
   autoDeleteDelayHours?: unknown;
+  instantUploadEnabled?: unknown;
+  externalUploadEnabled?: unknown;
+  instantUploadMaxSizeMiB?: unknown;
   r2?: Partial<S3Config>;
   s3?: Partial<S3Config>;
   provider?: string;
@@ -213,6 +219,10 @@ export function mergeSettings(defaults: PluginSettings, loaded: unknown): Plugin
     attachmentRoot: readNonEmptyString(data.attachmentRoot, defaults.attachmentRoot),
     deletePolicy: readDeletePolicy(data.deletePolicy, defaults.deletePolicy),
     autoDeleteDelayHours: readNonNegativeNumber(data.autoDeleteDelayHours, defaults.autoDeleteDelayHours),
+    // 立即上传相关设置，旧配置中没有时使用默认值（默认开启）
+    instantUploadEnabled: readBoolean(data.instantUploadEnabled, defaults.instantUploadEnabled),
+    externalUploadEnabled: readBoolean(data.externalUploadEnabled, defaults.externalUploadEnabled),
+    instantUploadMaxSizeMiB: readNonNegativeNumber(data.instantUploadMaxSizeMiB, defaults.instantUploadMaxSizeMiB),
     s3,
     enabledExtensions: migrated.enabledExtensions || data.enabledExtensions || defaults.enabledExtensions,
     minSizeRules: migrated.minSizeRules || data.minSizeRules || defaults.minSizeRules,
