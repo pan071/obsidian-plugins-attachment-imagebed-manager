@@ -1,4 +1,4 @@
-import { PluginSettings, S3Config, ReplacementType, PendingDelete, LogEntry } from "./types";
+import { PluginSettings, S3Config, ReplacementType, PendingDelete, LogEntry, DeletePolicy } from "./types";
 import { FILE_CATEGORIES } from "./file-categories";
 
 const DEFAULT_S3: S3Config = {
@@ -75,6 +75,14 @@ interface OldLoadedSettings {
 }
 
 interface LoadedSettings {
+  enabled?: unknown;
+  autoScanEnabled?: unknown;
+  scanIntervalMinutes?: unknown;
+  quietSeconds?: unknown;
+  autoScanMinSizeMiB?: unknown;
+  attachmentRoot?: unknown;
+  deletePolicy?: unknown;
+  autoDeleteDelayHours?: unknown;
   r2?: Partial<S3Config>;
   s3?: Partial<S3Config>;
   provider?: string;
@@ -90,6 +98,54 @@ interface LoadedSettings {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 读取已保存的布尔设置，类型不符时回退默认值。
+ *
+ * @param value data.json 中保存的值
+ * @param fallback 默认值
+ * @returns 有效的布尔值
+ */
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  // 只接受真正的布尔值，避免字符串等脏数据被当成开启
+  return typeof value === "boolean" ? value : fallback;
+}
+
+/**
+ * 读取已保存的非负数值设置，类型不符或不是有限数时回退默认值。
+ *
+ * @param value data.json 中保存的值
+ * @param fallback 默认值
+ * @returns 有效的非负数值
+ */
+function readNonNegativeNumber(value: unknown, fallback: number): number {
+  // 允许 0（如延迟删除 0 小时），拒绝负数、NaN 与 Infinity
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/**
+ * 读取已保存的非空字符串设置，空白或类型不符时回退默认值。
+ *
+ * @param value data.json 中保存的值
+ * @param fallback 默认值
+ * @returns 有效的字符串
+ */
+function readNonEmptyString(value: unknown, fallback: string): string {
+  // 去掉首尾空白后为空时视为未设置
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+/**
+ * 读取已保存的删除策略，取值不在枚举范围内时回退默认值。
+ *
+ * @param value data.json 中保存的值
+ * @param fallback 默认删除策略
+ * @returns 有效的删除策略
+ */
+function readDeletePolicy(value: unknown, fallback: DeletePolicy): DeletePolicy {
+  // 仅接受插件支持的三种删除策略
+  return value === "confirm" || value === "immediate" || value === "delayed" ? value : fallback;
 }
 
 function migrateOldSettings(loaded: OldLoadedSettings): Partial<PluginSettings> {
@@ -148,6 +204,15 @@ export function mergeSettings(defaults: PluginSettings, loaded: unknown): Plugin
 
   return {
     ...defaults,
+    // 恢复已保存的基础设置，修复每次启动都被重置为默认值的问题
+    enabled: readBoolean(data.enabled, defaults.enabled),
+    autoScanEnabled: readBoolean(data.autoScanEnabled, defaults.autoScanEnabled),
+    scanIntervalMinutes: readNonNegativeNumber(data.scanIntervalMinutes, defaults.scanIntervalMinutes),
+    quietSeconds: readNonNegativeNumber(data.quietSeconds, defaults.quietSeconds),
+    autoScanMinSizeMiB: readNonNegativeNumber(data.autoScanMinSizeMiB, defaults.autoScanMinSizeMiB),
+    attachmentRoot: readNonEmptyString(data.attachmentRoot, defaults.attachmentRoot),
+    deletePolicy: readDeletePolicy(data.deletePolicy, defaults.deletePolicy),
+    autoDeleteDelayHours: readNonNegativeNumber(data.autoDeleteDelayHours, defaults.autoDeleteDelayHours),
     s3,
     enabledExtensions: migrated.enabledExtensions || data.enabledExtensions || defaults.enabledExtensions,
     minSizeRules: migrated.minSizeRules || data.minSizeRules || defaults.minSizeRules,

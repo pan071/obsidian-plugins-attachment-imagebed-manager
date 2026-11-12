@@ -122,6 +122,18 @@ var DEFAULT_SETTINGS = {
 function isObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function readBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function readNonNegativeNumber(value, fallback) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+function readNonEmptyString(value, fallback) {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+function readDeletePolicy(value, fallback) {
+  return value === "confirm" || value === "immediate" || value === "delayed" ? value : fallback;
+}
 function migrateOldSettings(loaded) {
   const result = {};
   if (loaded.r2) {
@@ -168,6 +180,14 @@ function mergeSettings(defaults, loaded) {
   };
   return {
     ...defaults,
+    enabled: readBoolean(data.enabled, defaults.enabled),
+    autoScanEnabled: readBoolean(data.autoScanEnabled, defaults.autoScanEnabled),
+    scanIntervalMinutes: readNonNegativeNumber(data.scanIntervalMinutes, defaults.scanIntervalMinutes),
+    quietSeconds: readNonNegativeNumber(data.quietSeconds, defaults.quietSeconds),
+    autoScanMinSizeMiB: readNonNegativeNumber(data.autoScanMinSizeMiB, defaults.autoScanMinSizeMiB),
+    attachmentRoot: readNonEmptyString(data.attachmentRoot, defaults.attachmentRoot),
+    deletePolicy: readDeletePolicy(data.deletePolicy, defaults.deletePolicy),
+    autoDeleteDelayHours: readNonNegativeNumber(data.autoDeleteDelayHours, defaults.autoDeleteDelayHours),
     s3,
     enabledExtensions: migrated.enabledExtensions || data.enabledExtensions || defaults.enabledExtensions,
     minSizeRules: migrated.minSizeRules || data.minSizeRules || defaults.minSizeRules,
