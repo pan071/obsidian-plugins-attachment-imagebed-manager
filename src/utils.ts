@@ -66,6 +66,8 @@ export function contentTypeForExt(ext: string): string {
     heic: "image/heic",
     bmp: "image/bmp",
     tiff: "image/tiff",
+    // avif 使用标准 MIME，便于浏览器直接渲染
+    avif: "image/avif",
     mp3: "audio/mpeg",
     m4a: "audio/mp4",
     wav: "audio/wav",
@@ -83,7 +85,8 @@ export function contentTypeForExt(ext: string): string {
 }
 
 export function isPreviewableImage(ext: string): boolean {
-  return ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(
+  // Obsidian 内置的 Chromium 支持 avif，候选列表中可直接预览
+  return ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"].includes(
     String(ext || "").toLowerCase()
   );
 }

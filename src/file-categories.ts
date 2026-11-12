@@ -5,7 +5,8 @@ export const FILE_CATEGORIES: FileCategory[] = [
     id: "image",
     nameKey: "categoryImage",
     replacement: "image",
-    extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff"],
+    // avif 归入图片类别，上传后按图片嵌入（![...](url)）显示
+    extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff", "avif"],
   },
   {
     id: "video",

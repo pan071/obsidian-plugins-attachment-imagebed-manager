@@ -37,7 +37,7 @@ var FILE_CATEGORIES = [
     id: "image",
     nameKey: "categoryImage",
     replacement: "image",
-    extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff"]
+    extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff", "avif"]
   },
   {
     id: "video",
@@ -381,6 +381,7 @@ function contentTypeForExt(ext) {
     heic: "image/heic",
     bmp: "image/bmp",
     tiff: "image/tiff",
+    avif: "image/avif",
     mp3: "audio/mpeg",
     m4a: "audio/mp4",
     wav: "audio/wav",
@@ -397,7 +398,7 @@ function contentTypeForExt(ext) {
   return map[ext] || "application/octet-stream";
 }
 function isPreviewableImage(ext) {
-  return ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(
+  return ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"].includes(
     String(ext || "").toLowerCase()
   );
 }
