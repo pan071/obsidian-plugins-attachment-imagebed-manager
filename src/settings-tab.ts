@@ -160,6 +160,23 @@ export class AttachmentImagebedSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName(t("preserveNameExts"))
+      .setDesc(t("preserveNameExtsDesc"))
+      .addText((text) =>
+        text
+          .setPlaceholder("pdf, epub, docx, zip")
+          .setValue(this.plugin.settings.preserveNameExts.join(", "))
+          .onChange((value) => {
+            // 拆分逗号分隔的后缀名，去除点号小写并过滤空入
+            this.plugin.settings.preserveNameExts = value
+              .split(/[,\s]+/)
+              .map((e) => e.trim().replace(/^\./, "").toLowerCase())
+              .filter(Boolean);
+            void debouncedSave();
+          })
+      );
+
+    new Setting(containerEl)
       .setName(t("testConnection"))
       .setDesc(t("testConnectionDesc"))
       .addButton((button) =>

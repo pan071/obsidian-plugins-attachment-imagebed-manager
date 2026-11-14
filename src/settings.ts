@@ -51,6 +51,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   autoCandidateExts: DEFAULT_AUTO_CANDIDATE_EXTS,
   customExtensions: [],
   customReplacements: {},
+  preserveNameExts: [],
   pendingDeletes: [],
   logs: [],
 };
@@ -98,6 +99,7 @@ interface LoadedSettings {
   autoCandidateExts?: string[];
   customExtensions?: string[];
   customReplacements?: Record<string, ReplacementType>;
+  preserveNameExts?: string[];
   pendingDeletes?: PendingDelete[];
   logs?: LogEntry[];
 }
@@ -229,6 +231,7 @@ export function mergeSettings(defaults: PluginSettings, loaded: unknown): Plugin
     autoCandidateExts: migrated.autoCandidateExts || data.autoCandidateExts || defaults.autoCandidateExts,
     customExtensions: data.customExtensions || defaults.customExtensions,
     customReplacements: migrated.customReplacements || data.customReplacements || defaults.customReplacements,
+    preserveNameExts: Array.isArray(data.preserveNameExts) ? data.preserveNameExts : defaults.preserveNameExts,
     pendingDeletes: Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [],
     logs: Array.isArray(data.logs) ? data.logs.slice(0, 100) : [],
   };

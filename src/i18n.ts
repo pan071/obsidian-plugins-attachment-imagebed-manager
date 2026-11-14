@@ -48,6 +48,7 @@ export const I18N: Record<string, Record<string, string>> = {
     keepLocal: "Keep local files",
     deleteLocal: "Delete local files",
     movedToTrash: "Moved {count} local file(s) to trash.",
+    flushedPendingDeletes: "Deleted {count} already-uploaded local file(s) that were waiting for delayed removal.",
     localDeleteFailed: "Local delete failed: {error}",
     close: "Close",
     viewList: "List",
@@ -110,6 +111,9 @@ export const I18N: Record<string, Record<string, string>> = {
     objectPathTemplate: "Upload path template",
     pathTemplateDesc:
       "Variables: {ext} = extension, {hash} = file hash, {hash2} = first 2 chars of hash, {filename} = original name. Default works for most cases.",
+    preserveNameExts: "Preserve original filename for these extensions",
+    preserveNameExtsDesc:
+      "Comma-separated list of extensions (e.g. pdf, epub, zip). These files are stored as attachments/{ext}/{hash2}/{hash}/{filename}, keeping the original filename in the URL. The hash directory prevents name collisions.",
     testConnection: "Test connection",
     testConnectionDesc: "Click to verify your credentials are correct.",
     testing: "Testing...",
@@ -231,6 +235,7 @@ export const I18N: Record<string, Record<string, string>> = {
     keepLocal: "保留本地文件",
     deleteLocal: "删除本地文件",
     movedToTrash: "已将 {count} 个本地文件移入回收站。",
+    flushedPendingDeletes: "已删除 {count} 个已上传、尚在延迟删除队列等待的本地文件。",
     localDeleteFailed: "本地文件删除失败：{error}",
     close: "关闭",
     viewList: "列表",
@@ -293,6 +298,9 @@ export const I18N: Record<string, Record<string, string>> = {
     objectPathTemplate: "上传路径模板",
     pathTemplateDesc:
       "可用变量：{ext} = 后缀，{hash} = 文件哈希，{hash2} = 哈希前2位，{filename} = 原始文件名。默认值适用于大多数情况。",
+    preserveNameExts: "保留原始文件名的后缀",
+    preserveNameExtsDesc:
+      "逗号分隔的后缀列表（例如 pdf、epub、zip）。列表内的文件使用 attachments/{ext}/{hash2}/{hash}/{filename} 模板上传，URL 末尾保留原始文件名，哈希目录确保不同内容的同名文件不会冲突。",
     testConnection: "测试连接",
     testConnectionDesc: "点击验证凭据是否正确。",
     testing: "测试中...",

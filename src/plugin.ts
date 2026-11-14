@@ -168,6 +168,10 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
       new Notice(error instanceof Error ? error.message : String(error));
       return;
     }
+    // 上传前先处理本笔记中已替换但尚未到期的待删除本地文件，不受 dueAt 限制，
+    // 仅靠 isLocalFileReferenced 兜底确认无本地引用后即可安全删除
+    const flushed = await this.flushPendingDeletesForNote(activeFile.path);
+    if (flushed > 0) new Notice(this.t("flushedPendingDeletes", { count: flushed }));
     const candidates = await this.findCandidatesInNote(activeFile, {
       requireAutoCandidate: false,
       enforceAttachmentRoot: false,
@@ -721,7 +725,11 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
     const body = new Uint8Array(binary);
     const hash = await sha256Hex(body);
     const ext = file.extension.toLowerCase();
-    const key = renderPathTemplate(this.settings.s3.pathTemplate, {
+    // 该扩展名需要保留原始文件名时使用内置模板，确保无冲突且可复用
+    const pathTemplate = this.settings.preserveNameExts.includes(ext)
+      ? "attachments/{ext}/{hash2}/{hash}/{filename}"
+      : (this.settings.s3.pathTemplate || "attachments/{ext}/{hash2}/{hash}.{ext}");
+    const key = renderPathTemplate(pathTemplate, {
       ext,
       hash,
       hash2: hash.slice(0, 2),
@@ -730,8 +738,8 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
     const publicUrl = buildPublicUrl(this.settings.s3.customDomainName, key);
     // 上传前查询对象是否已存在
     const exists = await headS3Object(this.settings.s3, key);
-    // 路径模板含内容哈希时，同名对象内容必然一致，直接复用
-    if (exists === true && this.isContentAddressedTemplate()) {
+    // 实际使用的路径模板含内容哈希时，同名对象内容必然一致，直接复用
+    if (exists === true && pathTemplate.includes("{hash}")) {
       return { key, publicUrl, created: false };
     }
     const contentType = contentTypeForExt(ext);
@@ -764,10 +772,10 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
   }
 
   buildReplacement(ref: LocalRef, candidate: Candidate, publicUrl: string): string {
-    const encodedBase = encodeURI(publicUrl);
+    // publicUrl 已由 buildPublicUrl 按段做过 encodeURIComponent，不在此重复编码，避免空格等字符被二次编码为 %2520
     const url = ref.fragment
-      ? `${encodedBase}#${encodeURIComponent(ref.fragment)}`
-      : encodedBase;
+      ? `${publicUrl}#${encodeURIComponent(ref.fragment)}`
+      : publicUrl;
     const label = ref.label || candidate.file.basename;
 
     if (candidate.replacement === "image")
@@ -853,6 +861,51 @@ export default class AttachmentImagebedManagerPlugin extends Plugin {
       (entry) => !localFiles.some((f) => f.path === entry.sourcePath)
     );
     await this.saveSettings();
+  }
+
+  /**
+   * 立即处理指定笔记的待删除队列，跳过 dueAt 限制。
+   * 已被其他笔记本地引用的文件不会删除，会重新加入队列等待下一轮检查。
+   *
+   * @param notePath 笔记路径
+   * @returns 实际删除的文件数量
+   */
+  async flushPendingDeletesForNote(notePath: string): Promise<number> {
+    const pending = Array.isArray(this.settings.pendingDeletes)
+      ? this.settings.pendingDeletes
+      : [];
+    // 报属该笔记的待删除条目
+    const targets = pending.filter((entry) => entry.notePath === notePath);
+    if (targets.length === 0) return 0;
+    // 队列中保留其他笔记的条目
+    const remaining = pending.filter((entry) => entry.notePath !== notePath);
+    this.settings.pendingDeletes = remaining;
+    const retryDelayMs = Math.max(1, Number(this.settings.autoDeleteDelayHours) || 24) * 60 * 60 * 1000;
+    let deleted = 0;
+    for (const entry of targets) {
+      try {
+        // 仍被任意笔记本地引用时保持不动，重新排队
+        if (await this.isLocalFileReferenced(entry.sourcePath)) {
+          const retryAt = Date.now() + retryDelayMs;
+          remaining.push({ ...entry, dueAt: retryAt });
+          continue;
+        }
+        const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+        await this.deleteLocalFileRecords(
+          noteFile instanceof TFile ? noteFile : { path: notePath },
+          [{ path: entry.sourcePath, name: basename(entry.sourcePath), remoteUrl: entry.remoteUrl }],
+          "delayed-delete"
+        );
+        deleted++;
+      } catch (error) {
+        // 删除失败时保持原条目不丢失
+        remaining.push(entry);
+        console.error(`Flush pending delete failed for ${entry.sourcePath}:`, error);
+      }
+    }
+    this.settings.pendingDeletes = remaining;
+    await this.saveSettings();
+    return deleted;
   }
 
   async processPendingDeletes(): Promise<void> {

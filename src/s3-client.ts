@@ -35,13 +35,17 @@ export async function putS3Object(
     const dateStamp = amzDate.slice(0, 8);
     const payloadHash = precomputedHash || await sha256Hex(body);
 
+    // 对象路径含内容哈希、内容永不变，使用长期缓存策略
+    const cacheControl = "public, max-age=31536000, immutable";
+
     const canonicalHeaders =
       [
+        `cache-control:${cacheControl}`,
         `host:${parsed.host}`,
         `x-amz-content-sha256:${payloadHash}`,
         `x-amz-date:${amzDate}`,
       ].join("\n") + "\n";
-    const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+    const signedHeaders = "cache-control;host;x-amz-content-sha256;x-amz-date";
 
     const canonicalRequest = [
       "PUT",
@@ -71,6 +75,7 @@ export async function putS3Object(
 
     const headers: Record<string, string> = {
       "Content-Type": contentType,
+      "Cache-Control": cacheControl,
       "x-amz-content-sha256": payloadHash,
       "x-amz-date": amzDate,
       Authorization: `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,

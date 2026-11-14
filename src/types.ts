@@ -36,6 +36,12 @@ export interface PluginSettings {
   autoCandidateExts: string[];
   customExtensions: string[];
   customReplacements: Record<string, ReplacementType>;
+  /**
+   * 上传时保留原始文件名的扩展名列表。
+   * 列表内的扩展名使用 attachments/{ext}/{hash2}/{hash}/{filename} 模板，
+   * 其余扩展名继续使用全局 pathTemplate。
+   */
+  preserveNameExts: string[];
   pendingDeletes: PendingDelete[];
   logs: LogEntry[];
 }

@@ -120,6 +120,7 @@ var DEFAULT_SETTINGS = {
   autoCandidateExts: DEFAULT_AUTO_CANDIDATE_EXTS,
   customExtensions: [],
   customReplacements: {},
+  preserveNameExts: [],
   pendingDeletes: [],
   logs: []
 };
@@ -203,6 +204,7 @@ function mergeSettings(defaults, loaded) {
     autoCandidateExts: migrated.autoCandidateExts || data.autoCandidateExts || defaults.autoCandidateExts,
     customExtensions: data.customExtensions || defaults.customExtensions,
     customReplacements: migrated.customReplacements || data.customReplacements || defaults.customReplacements,
+    preserveNameExts: Array.isArray(data.preserveNameExts) ? data.preserveNameExts : defaults.preserveNameExts,
     pendingDeletes: Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [],
     logs: Array.isArray(data.logs) ? data.logs.slice(0, 100) : []
   };
@@ -445,12 +447,14 @@ async function putS3Object(config, key, body, contentType, formatError, precompu
     const amzDate = toAmzDate(now);
     const dateStamp = amzDate.slice(0, 8);
     const payloadHash = precomputedHash || await sha256Hex(body);
+    const cacheControl = "public, max-age=31536000, immutable";
     const canonicalHeaders = [
+      `cache-control:${cacheControl}`,
       `host:${parsed.host}`,
       `x-amz-content-sha256:${payloadHash}`,
       `x-amz-date:${amzDate}`
     ].join("\n") + "\n";
-    const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+    const signedHeaders = "cache-control;host;x-amz-content-sha256;x-amz-date";
     const canonicalRequest = [
       "PUT",
       parsed.pathname,
@@ -476,6 +480,7 @@ async function putS3Object(config, key, body, contentType, formatError, precompu
     const signature = await hmacSha256Hex(signingKey, stringToSign);
     const headers = {
       "Content-Type": contentType,
+      "Cache-Control": cacheControl,
       "x-amz-content-sha256": payloadHash,
       "x-amz-date": amzDate,
       Authorization: `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
@@ -691,6 +696,7 @@ var I18N = {
     keepLocal: "Keep local files",
     deleteLocal: "Delete local files",
     movedToTrash: "Moved {count} local file(s) to trash.",
+    flushedPendingDeletes: "Deleted {count} already-uploaded local file(s) that were waiting for delayed removal.",
     localDeleteFailed: "Local delete failed: {error}",
     close: "Close",
     viewList: "List",
@@ -748,6 +754,8 @@ var I18N = {
     publicDomainDesc: "The URL prefix for accessing uploaded files, e.g. https://pub-xxx.r2.dev",
     objectPathTemplate: "Upload path template",
     pathTemplateDesc: "Variables: {ext} = extension, {hash} = file hash, {hash2} = first 2 chars of hash, {filename} = original name. Default works for most cases.",
+    preserveNameExts: "Preserve original filename for these extensions",
+    preserveNameExtsDesc: "Comma-separated list of extensions (e.g. pdf, epub, zip). These files are stored as attachments/{ext}/{hash2}/{hash}/{filename}, keeping the original filename in the URL. The hash directory prevents name collisions.",
     testConnection: "Test connection",
     testConnectionDesc: "Click to verify your credentials are correct.",
     testing: "Testing...",
@@ -862,6 +870,7 @@ var I18N = {
     keepLocal: "\u4FDD\u7559\u672C\u5730\u6587\u4EF6",
     deleteLocal: "\u5220\u9664\u672C\u5730\u6587\u4EF6",
     movedToTrash: "\u5DF2\u5C06 {count} \u4E2A\u672C\u5730\u6587\u4EF6\u79FB\u5165\u56DE\u6536\u7AD9\u3002",
+    flushedPendingDeletes: "\u5DF2\u5220\u9664 {count} \u4E2A\u5DF2\u4E0A\u4F20\u3001\u5C1A\u5728\u5EF6\u8FDF\u5220\u9664\u961F\u5217\u7B49\u5F85\u7684\u672C\u5730\u6587\u4EF6\u3002",
     localDeleteFailed: "\u672C\u5730\u6587\u4EF6\u5220\u9664\u5931\u8D25\uFF1A{error}",
     close: "\u5173\u95ED",
     viewList: "\u5217\u8868",
@@ -919,6 +928,8 @@ var I18N = {
     publicDomainDesc: "\u4E0A\u4F20\u6587\u4EF6\u7684\u8BBF\u95EE\u524D\u7F00\uFF0C\u4F8B\u5982 https://pub-xxx.r2.dev",
     objectPathTemplate: "\u4E0A\u4F20\u8DEF\u5F84\u6A21\u677F",
     pathTemplateDesc: "\u53EF\u7528\u53D8\u91CF\uFF1A{ext} = \u540E\u7F00\uFF0C{hash} = \u6587\u4EF6\u54C8\u5E0C\uFF0C{hash2} = \u54C8\u5E0C\u524D2\u4F4D\uFF0C{filename} = \u539F\u59CB\u6587\u4EF6\u540D\u3002\u9ED8\u8BA4\u503C\u9002\u7528\u4E8E\u5927\u591A\u6570\u60C5\u51B5\u3002",
+    preserveNameExts: "\u4FDD\u7559\u539F\u59CB\u6587\u4EF6\u540D\u7684\u540E\u7F00",
+    preserveNameExtsDesc: "\u9017\u53F7\u5206\u9694\u7684\u540E\u7F00\u5217\u8868\uFF08\u4F8B\u5982 pdf\u3001epub\u3001zip\uFF09\u3002\u5217\u8868\u5185\u7684\u6587\u4EF6\u4F7F\u7528 attachments/{ext}/{hash2}/{hash}/{filename} \u6A21\u677F\u4E0A\u4F20\uFF0CURL \u672B\u5C3E\u4FDD\u7559\u539F\u59CB\u6587\u4EF6\u540D\uFF0C\u54C8\u5E0C\u76EE\u5F55\u786E\u4FDD\u4E0D\u540C\u5185\u5BB9\u7684\u540C\u540D\u6587\u4EF6\u4E0D\u4F1A\u51B2\u7A81\u3002",
     testConnection: "\u6D4B\u8BD5\u8FDE\u63A5",
     testConnectionDesc: "\u70B9\u51FB\u9A8C\u8BC1\u51ED\u636E\u662F\u5426\u6B63\u786E\u3002",
     testing: "\u6D4B\u8BD5\u4E2D...",
@@ -1872,6 +1883,12 @@ var AttachmentImagebedSettingTab = class extends import_obsidian6.PluginSettingT
     new import_obsidian6.Setting(containerEl).setName(t2("objectPathTemplate")).setDesc(t2("pathTemplateDesc")).addText(
       (text) => text.setPlaceholder("attachments/{ext}/{hash2}/{hash}.{ext}").setValue(String(this.plugin.settings.s3.pathTemplate || "")).onChange((value) => {
         this.plugin.settings.s3.pathTemplate = value.trim();
+        void debouncedSave();
+      })
+    );
+    new import_obsidian6.Setting(containerEl).setName(t2("preserveNameExts")).setDesc(t2("preserveNameExtsDesc")).addText(
+      (text) => text.setPlaceholder("pdf, epub, docx, zip").setValue(this.plugin.settings.preserveNameExts.join(", ")).onChange((value) => {
+        this.plugin.settings.preserveNameExts = value.split(/[,\s]+/).map((e) => e.trim().replace(/^\./, "").toLowerCase()).filter(Boolean);
         void debouncedSave();
       })
     );
@@ -2954,6 +2971,9 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian8.Plugin {
       new import_obsidian8.Notice(error instanceof Error ? error.message : String(error));
       return;
     }
+    const flushed = await this.flushPendingDeletesForNote(activeFile.path);
+    if (flushed > 0)
+      new import_obsidian8.Notice(this.t("flushedPendingDeletes", { count: flushed }));
     const candidates = await this.findCandidatesInNote(activeFile, {
       requireAutoCandidate: false,
       enforceAttachmentRoot: false,
@@ -3486,7 +3506,8 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian8.Plugin {
     const body = new Uint8Array(binary);
     const hash = await sha256Hex(body);
     const ext = file.extension.toLowerCase();
-    const key = renderPathTemplate(this.settings.s3.pathTemplate, {
+    const pathTemplate = this.settings.preserveNameExts.includes(ext) ? "attachments/{ext}/{hash2}/{hash}/{filename}" : this.settings.s3.pathTemplate || "attachments/{ext}/{hash2}/{hash}.{ext}";
+    const key = renderPathTemplate(pathTemplate, {
       ext,
       hash,
       hash2: hash.slice(0, 2),
@@ -3494,7 +3515,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian8.Plugin {
     });
     const publicUrl = buildPublicUrl(this.settings.s3.customDomainName, key);
     const exists = await headS3Object(this.settings.s3, key);
-    if (exists === true && this.isContentAddressedTemplate()) {
+    if (exists === true && pathTemplate.includes("{hash}")) {
       return { key, publicUrl, created: false };
     }
     const contentType = contentTypeForExt(ext);
@@ -3522,8 +3543,7 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian8.Plugin {
     return this.isMobile && mode === "delayed" ? "confirm" : mode;
   }
   buildReplacement(ref, candidate, publicUrl) {
-    const encodedBase = encodeURI(publicUrl);
-    const url = ref.fragment ? `${encodedBase}#${encodeURIComponent(ref.fragment)}` : encodedBase;
+    const url = ref.fragment ? `${publicUrl}#${encodeURIComponent(ref.fragment)}` : publicUrl;
     const label = ref.label || candidate.file.basename;
     if (candidate.replacement === "image")
       return `![${escapeMarkdownLabel(label)}](${url})`;
@@ -3598,6 +3618,45 @@ var AttachmentImagebedManagerPlugin = class extends import_obsidian8.Plugin {
       (entry) => !localFiles.some((f) => f.path === entry.sourcePath)
     );
     await this.saveSettings();
+  }
+  /**
+   * 立即处理指定笔记的待删除队列，跳过 dueAt 限制。
+   * 已被其他笔记本地引用的文件不会删除，会重新加入队列等待下一轮检查。
+   *
+   * @param notePath 笔记路径
+   * @returns 实际删除的文件数量
+   */
+  async flushPendingDeletesForNote(notePath) {
+    const pending = Array.isArray(this.settings.pendingDeletes) ? this.settings.pendingDeletes : [];
+    const targets = pending.filter((entry) => entry.notePath === notePath);
+    if (targets.length === 0)
+      return 0;
+    const remaining = pending.filter((entry) => entry.notePath !== notePath);
+    this.settings.pendingDeletes = remaining;
+    const retryDelayMs = Math.max(1, Number(this.settings.autoDeleteDelayHours) || 24) * 60 * 60 * 1e3;
+    let deleted = 0;
+    for (const entry of targets) {
+      try {
+        if (await this.isLocalFileReferenced(entry.sourcePath)) {
+          const retryAt = Date.now() + retryDelayMs;
+          remaining.push({ ...entry, dueAt: retryAt });
+          continue;
+        }
+        const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+        await this.deleteLocalFileRecords(
+          noteFile instanceof import_obsidian8.TFile ? noteFile : { path: notePath },
+          [{ path: entry.sourcePath, name: basename2(entry.sourcePath), remoteUrl: entry.remoteUrl }],
+          "delayed-delete"
+        );
+        deleted++;
+      } catch (error) {
+        remaining.push(entry);
+        console.error(`Flush pending delete failed for ${entry.sourcePath}:`, error);
+      }
+    }
+    this.settings.pendingDeletes = remaining;
+    await this.saveSettings();
+    return deleted;
   }
   async processPendingDeletes() {
     const pending = Array.isArray(this.settings.pendingDeletes) ? this.settings.pendingDeletes : [];
